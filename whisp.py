@@ -74,32 +74,70 @@ def initialize_log_inventory() -> None:
         click.secho("Scanning for log files...", fg='blue')
         log_files = crawler.get_files()
         analyzer = AIAnalyzer(api_key=os.getenv('GOOGLE_API_KEY'), debug=True)
-        analyzer.populate_log_inventory(log_files)
+        log_available = analyzer.populate_log_inventory(log_files)
 
-        inventory = [
-            {
-                "path": str(file),
-                "size": file.stat().st_size,
-                "modified": datetime.fromtimestamp(file.stat().st_mtime).isoformat()
-            }
-            for file in log_files
-        ]
-        
+        # Extract the list from the dictionary if needed
+        log_files_list = log_available.get('log_files', []) if isinstance(log_available, dict) else log_available
+
+        # Create inventory with the correct list format
         log_inventory = LogInventory(
             last_updated=datetime.now().isoformat(),
-            log_files=inventory
+            log_files=log_files_list
         )
         
         with open(CACHE_FILE, 'w') as f:
             f.write(log_inventory.model_dump_json(indent=2))
             
         click.secho(f"Log inventory saved to {CACHE_FILE}", fg='green')
-        click.secho(f"Found {len(inventory)} log files", fg='blue')
+        click.secho(f"Found {len(log_files_list)} log files", fg='blue')
         
     except Exception as e:
         msg = f"Error initializing log inventory: {str(e)}"
         click.secho(msg, fg='red', err=True)
         raise
+
+
+def load_log_inventory() -> Optional[LogInventory]:
+    """Load the log inventory from cache file."""
+    try:
+        if not CACHE_FILE.exists():
+            return None
+        with open(CACHE_FILE, 'r') as f:
+            data = json.load(f)
+            return LogInventory(**data)
+    except Exception as e:
+        msg = f"Error loading log inventory: {str(e)}"
+        click.secho(msg, fg='red', err=True)
+        return None
+
+
+def display_log_inventory() -> None:
+    """Display the log inventory in a formatted table."""
+    inventory = load_log_inventory()
+    if not inventory:
+        click.secho("No log inventory found. Run --init first.", fg='yellow')
+        return
+
+    click.secho("\nLog Files Inventory:", fg='green', bold=True)
+    click.secho(f"Last updated: {inventory.last_updated}", fg='blue')
+    click.echo("\nAvailable logs:")
+    
+    for log in inventory.log_files:
+        name = log.get('name', 'Unknown')
+        path = log.get('path', 'Unknown')
+        click.echo(f"- {name}: {path}")
+
+
+def find_log_by_name(name: str) -> Optional[str]:
+    """Find a log file's full path by its short name."""
+    inventory = load_log_inventory()
+    if not inventory:
+        return None
+        
+    for log in inventory.log_files:
+        if log.get('name') == name:
+            return log.get('path')
+    return None
 
 
 def format_issue_header(issue: Dict[str, Any]) -> str:
@@ -164,42 +202,80 @@ def collect_stream_response(response_stream: Any) -> str:
     return "".join(full_response)
 
 
-@click.group()
-def cli() -> None:
+@click.command()
+@click.option(
+    '--init', '-i', 
+    is_flag=True, 
+    help='Initialize log file inventory'
+)
+@click.option(
+    '--file', '-f',
+    type=str, 
+    help='Full path to the log file to analyze'
+)
+@click.option(
+    '--name', '-n',
+    type=str, 
+    help='Short name of the log file from inventory'
+)
+@click.option('--list', '-l', is_flag=True, help='List available log files')
+@click.option('--verbose', '-v', is_flag=True, help='Show verbose output')
+def cli(init: bool, file: str, name: str, list: bool, verbose: bool) -> None:
     """CLI tool for analyzing log files with AI."""
-    pass
+    if init:
+        try:
+            click.secho("Initializing log inventory...", fg='blue')
+            initialize_log_inventory()
+        except Exception as e:
+            msg = f"Initialization failed: {str(e)}"
+            click.secho(msg, fg='red', err=True)
+            return
 
-
-@cli.command()
-def init() -> None:
-    """Initialize by scanning for log files and creating inventory."""
-    initialize_log_inventory()
-
-
-@cli.command()
-@click.option('--file', '-f', type=click.Path(exists=True), help='Path to a file to analyze')
-@click.option('--debug', '-d', is_flag=True, help='Enable debug mode for verbose output')
-def analyze(file: str, debug: bool) -> None:
-    """Analyze a specific log file."""
-    if not file:
-        click.secho('Please provide a file to analyze', fg='red')
+    if list:
+        display_log_inventory()
         return
 
-    try:
-        log_handler = LogHandler(file)
-        click.secho(f"Analyzing file: {log_handler.get_file()}...", fg='blue')
-        
-        analyzer = AIAnalyzer(api_key=os.getenv('GOOGLE_API_KEY'), debug=debug)
-        if json_response := analyzer.analyze_log_file(log_handler.get_file()):
-            click.secho("\nAnalysis Results:", fg='green', bold=True)
-            print_formatted_issues(json_response)
+    if name:
+        # Try to find the file by short name
+        if full_path := find_log_by_name(name):
+            file = full_path
         else:
-            click.secho("Failed to parse analysis results.", fg='red')
+            click.secho(
+                f"No log file found with short name: {name}", 
+                fg='red',
+                err=True
+            )
+            return
+
+    if file:
+        try:
+            log_handler = LogHandler(file)
+            click.secho(
+                f"Analyzing file: {log_handler.get_file()}...", 
+                fg='blue'
+            )
             
-    except (FileNotFoundError, PermissionError) as e:
-        click.secho(f"File error: {str(e)}", fg='red', err=True)
-    except Exception as e:
-        click.secho(f"Error ({type(e).__name__}): {str(e)}", fg='red', err=True)
+            analyzer = AIAnalyzer(
+                api_key=os.getenv('GOOGLE_API_KEY'), 
+                debug=verbose
+            )
+            if json_response := analyzer.analyze_log_file(
+                log_handler.get_file()
+            ):
+                click.secho("\nAnalysis Results:", fg='green', bold=True)
+                print_formatted_issues(json_response)
+            else:
+                click.secho("Failed to parse analysis results.", fg='red')
+                
+        except (FileNotFoundError, PermissionError) as e:
+            click.secho(f"File error: {str(e)}", fg='red', err=True)
+        except Exception as e:
+            msg = f"Error ({type(e).__name__}): {str(e)}"
+            click.secho(msg, fg='red', err=True)
+
+    if not any([init, list, file, name]):
+        msg = "No action specified. Use --help for usage information."
+        click.secho(msg, fg='yellow')
 
 
 if __name__ == '__main__':

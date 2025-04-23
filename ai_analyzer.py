@@ -3,7 +3,7 @@ import json
 from pathlib import Path
 import click
 from google import genai
-from google.generativeai import GenerativeResponse
+from google.generativeai.types import GenerateContentResponse
 
 # Constants
 DEFAULT_MODEL = 'gemini-1.5-flash'
@@ -42,7 +42,7 @@ class AIAnalyzer:
         
         complete_response = self._collect_stream_response(response_stream)
         self._debug_log("Received complete response from AI model")
-        
+        print(complete_response)
         return self._try_parse_json_response(complete_response)
 
     def analyze_log_file(self, file_path: str) -> Optional[Dict[str, Any]]:
@@ -83,14 +83,14 @@ class AIAnalyzer:
         if self.debug:
             click.secho(f"[DEBUG] {message}", fg='blue')
 
-    def _generate_content(self, contents: Any) -> Iterator[GenerativeResponse]:
+    def _generate_content(self, contents: Any) -> Iterator[GenerateContentResponse]:
         """Generate content using the AI model.
         
         Args:
             contents: Content to analyze
             
         Returns:
-            Iterator[GenerativeResponse]: Stream of AI responses
+            Iterator[GenerateContentResponse]: Stream of AI responses
         """
         return self.client.models.generate_content_stream(
             model=DEFAULT_MODEL,
@@ -118,6 +118,7 @@ class AIAnalyzer:
             "        {\n"
             '            "file": "absolute file name",\n'
             '            "description": "brief description of the log file purpose"\n'
+            '            "short_name": "unique short name to be used as dictionary reference",\n'
             "        }\n"
             "    ]\n"
             "}"
@@ -152,7 +153,7 @@ class AIAnalyzer:
         self._debug_log("File uploaded successfully")
         return log_file
 
-    def _collect_stream_response(self, response_stream: Iterator[GenerativeResponse]) -> str:
+    def _collect_stream_response(self, response_stream: Iterator[GenerateContentResponse]) -> str:
         """Collect streaming response from the AI model."""
         full_response = []
         chunk_count = 0
