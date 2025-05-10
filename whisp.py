@@ -123,9 +123,11 @@ def display_log_inventory() -> None:
     click.echo("\nAvailable logs:")
     
     for log in inventory.log_files:
-        name = log.get('name', 'Unknown')
-        path = log.get('path', 'Unknown')
-        click.echo(f"- {name}: {path}")
+        short_name = log.get('short_name', 'Unknown')
+        file_path = log.get('file', 'Unknown')
+        description = log.get('description', 'No description available')
+        click.echo(f"- {short_name}: {file_path}")
+        click.secho(f"  Description: {description}", fg='cyan')
 
 
 def find_log_by_name(name: str) -> Optional[str]:
@@ -135,8 +137,8 @@ def find_log_by_name(name: str) -> Optional[str]:
         return None
         
     for log in inventory.log_files:
-        if log.get('name') == name:
-            return log.get('path')
+        if log.get('short_name') == name:
+            return log.get('file')
     return None
 
 
@@ -161,16 +163,34 @@ def print_formatted_issues(json_response: Dict[str, Any]) -> None:
     }
     
     for issue in json_response['issues']:
-        header_color = level_colors.get(issue['log_level'], 'blue')
-        click.secho(format_issue_header(issue), fg=header_color, bold=True)
-        click.secho(f"Summary: {issue['summary']}", fg='cyan')
-        click.secho(f"Original: {issue['issue_original_line']}", fg='white')
+        # Use get() with default values to handle missing fields
+        index = issue.get('index', 0)
+        timestamp = issue.get('log_timestamp', 'Unknown time')
+        level = issue.get('log_level', 'UNKNOWN')
+        summary = issue.get('summary', 'No summary available')
+        
+        header_color = level_colors.get(level, 'blue')
+        click.secho(f"|{index}|{level}|{timestamp}|", fg=header_color, bold=True)
+        click.secho(f"Summary: {summary}", fg='cyan')
+        
+        # Handle both single line and multiple occurrences formats
+        if 'issue_original_line' in issue:
+            click.secho(f"Original: {issue['issue_original_line']}", fg='white')
+        elif 'occurrences' in issue:
+            for occurrence in issue['occurrences']:
+                occ_time = occurrence.get('log_timestamp', 'Unknown time')
+                occ_line = occurrence.get('issue_original_line', 'No original line available')
+                click.secho(f"[{occ_time}] {occ_line}", fg='white')
+        
+        if 'occurrence_count' in issue and issue['occurrence_count'] > 1:
+            click.secho(f"Occurrences: {issue['occurrence_count']}", fg='yellow')
+            
         click.echo("")
 
 
 def try_parse_json_response(response_text: str, max_retries: int = 3) -> Optional[Dict]:
     """Try to parse the response as JSON, with retries and formatting fixes."""
-    for _ in range(max_retries):
+    for attempt in range(max_retries):
         try:
             return json.loads(response_text)
         except json.JSONDecodeError:
@@ -181,6 +201,10 @@ def try_parse_json_response(response_text: str, max_retries: int = 3) -> Optiona
                     return json.loads(response_text[start_idx:end_idx])
                 except json.JSONDecodeError:
                     continue
+    
+    # If all parsing attempts failed, print the raw response
+    click.secho("\nFailed to parse JSON. Raw response:", fg='yellow')
+    click.echo(response_text)
     return None
 
 
@@ -202,25 +226,44 @@ def collect_stream_response(response_stream: Any) -> str:
     return "".join(full_response)
 
 
+def resolve_log_file(file_input: str) -> Optional[str]:
+    """Resolve a log file path from either direct path or inventory name.
+    
+    Args:
+        file_input: Either a file path or a short name from inventory
+        
+    Returns:
+        Optional[str]: Resolved file path or None if not found
+    """
+    # First try as direct file path
+    if os.path.exists(file_input):
+        return file_input
+        
+    # If not a direct path, check inventory
+    inventory = load_log_inventory()
+    if inventory:
+        for log in inventory.log_files:
+            if log.get('short_name') == file_input:
+                file_path = log.get('file')
+                if file_path and os.path.exists(file_path):
+                    return file_path
+    
+    return None
+
 @click.command()
 @click.option(
-    '--init', '-i', 
-    is_flag=True, 
+    '--init', '-i',
+    is_flag=True,
     help='Initialize log file inventory'
 )
 @click.option(
     '--file', '-f',
-    type=str, 
-    help='Full path to the log file to analyze'
-)
-@click.option(
-    '--name', '-n',
-    type=str, 
-    help='Short name of the log file from inventory'
+    type=str,
+    help='File path or short name from inventory to analyze'
 )
 @click.option('--list', '-l', is_flag=True, help='List available log files')
 @click.option('--verbose', '-v', is_flag=True, help='Show verbose output')
-def cli(init: bool, file: str, name: str, list: bool, verbose: bool) -> None:
+def cli(init: bool, file: str, list: bool, verbose: bool) -> None:
     """CLI tool for analyzing log files with AI."""
     if init:
         try:
@@ -235,37 +278,37 @@ def cli(init: bool, file: str, name: str, list: bool, verbose: bool) -> None:
         display_log_inventory()
         return
 
-    if name:
-        # Try to find the file by short name
-        if full_path := find_log_by_name(name):
-            file = full_path
-        else:
-            click.secho(
-                f"No log file found with short name: {name}", 
-                fg='red',
-                err=True
-            )
-            return
-
     if file:
         try:
-            log_handler = LogHandler(file)
-            click.secho(
-                f"Analyzing file: {log_handler.get_file()}...", 
-                fg='blue'
-            )
-            
-            analyzer = AIAnalyzer(
-                api_key=os.getenv('GOOGLE_API_KEY'), 
-                debug=verbose
-            )
-            if json_response := analyzer.analyze_log_file(
-                log_handler.get_file()
-            ):
-                click.secho("\nAnalysis Results:", fg='green', bold=True)
-                print_formatted_issues(json_response)
+            if resolved_path := resolve_log_file(file):
+                log_handler = LogHandler(resolved_path)
+                click.secho(
+                    f"Analyzing file: {log_handler.get_file()}...",
+                    fg='blue'
+                )
+                
+                analyzer = AIAnalyzer(
+                    api_key=os.getenv('GOOGLE_API_KEY'),
+                    debug=verbose
+                )
+                if json_response := analyzer.analyze_log_file(
+                    log_handler.get_file()
+                ):
+                    click.secho("\nAnalysis Results:", fg='green', bold=True)
+                    print_formatted_issues(json_response)
+                else:
+                    click.secho("Failed to parse analysis results.", fg='red')
             else:
-                click.secho("Failed to parse analysis results.", fg='red')
+                click.secho(
+                    f"Error: '{file}' not found as file path or in inventory.",
+                    fg='red',
+                    err=True
+                )
+                if not os.path.exists(CACHE_FILE):
+                    click.secho(
+                        "Tip: Run --init first to build log inventory.",
+                        fg='yellow'
+                    )
                 
         except (FileNotFoundError, PermissionError) as e:
             click.secho(f"File error: {str(e)}", fg='red', err=True)
@@ -273,7 +316,7 @@ def cli(init: bool, file: str, name: str, list: bool, verbose: bool) -> None:
             msg = f"Error ({type(e).__name__}): {str(e)}"
             click.secho(msg, fg='red', err=True)
 
-    if not any([init, list, file, name]):
+    if not any([init, list, file]):
         msg = "No action specified. Use --help for usage information."
         click.secho(msg, fg='yellow')
 

@@ -107,39 +107,61 @@ class AIAnalyzer:
 
     def _create_inventory_prompt(self, files_str: str) -> str:
         """Create the inventory analysis prompt."""
-        return (
-            "Analyze this log file list and return a valid JSON object "
-            "containing a list of available logs in this system. "
-            "Keep only the most relevant information.\n"
-            f"Files to analyze:\n{files_str}\n\n"
-            "Return only a valid JSON object with this structure:\n"
-            "{\n"
-            '    "log_files": [\n'
-            "        {\n"
-            '            "file": "absolute file name",\n'
-            '            "description": "brief description of the log file purpose"\n'
-            '            "short_name": "unique short name to be used as dictionary reference",\n'
-            "        }\n"
-            "    ]\n"
-            "}"
-        )
+        prompt = f"""Analyze the following list of log files and return a valid JSON object.  
+                    Identify and include only the most relevant log files for system analysis.  
+                    For each relevant file, extract:
+                    - the absolute file name,  
+                    - a brief description of its purpose, and  
+                    - a short, unique identifier (`short_name`) to reference it programmatically.  
+                    The `short_name` should be lowercase, concise, and suitable as a dictionary key (e.g., `auth_log`, `kernel_log`).  
+                    Output only the JSON object, with no additional text.  
+                    Use the following structure:
+
+                    {{
+                    "log_files": [
+                        {{
+                        "file": "absolute file name",
+                        "description": "brief description of the log file purpose",
+                        "short_name": "unique short name to be used as dictionary reference"
+                        }}
+                    ]
+                    }}
+
+                    Files to analyze:
+                    {files_str}
+                    """
+        return prompt
 
     def _create_analysis_prompt(self) -> str:
         """Create the log file analysis prompt."""
         return (
-            "Parse this log file and return a valid JSON object, "
-            "order the issues from most recent to oldest timestamp. "
-            "Do not include any text before or after the JSON:\n"
+            "Parse the following log file and return a valid JSON object. "
+            "Include only entries with log levels: ERROR, WARNING, or CRITICAL. "
+            "Sort the issues from most recent to oldest based on the timestamp. "
+            "Convert all timestamps to ISO 8601 format (YYYY-MM-DDTHH:MM:SSZ). "
+            "Group duplicate issues by identical log_level and summary. "
+            "For each group, include:\n\n"
+            "- the most recent timestamp,\n"
+            "- the number of occurrences, and\n"
+            "- a list of all matching original log lines with their timestamps.\n\n"
+            "Output only the JSON object, with no additional text before or after. "
+            "Use the following structure:\n"
             "{\n"
-            '    "issues": [\n'
+            '  "issues": [\n'
+            "    {\n"
+            '      "index": number,\n'
+            '      "log_timestamp": "Most recent timestamp in the group (ISO 8601)",\n'
+            '      "log_level": "ERROR/WARNING/CRITICAL",\n'
+            '      "summary": "Short description of the issue",\n'
+            '      "occurrence_count": number,\n'
+            '      "occurrences": [\n'
             "        {\n"
-            '            "index": number,\n'
-            '            "log_timestamp": "timestamp",\n'
-            '            "log_level": "ERROR/WARNING/etc",\n'
-            '            "summary": "description of the issue",\n'
-            '            "issue_original_line": "log line"\n'
+            '          "log_timestamp": "ISO 8601 timestamp",\n'
+            '          "issue_original_line": "Exact log line"\n'
             "        }\n"
-            "    ]\n"
+            "      ]\n"
+            "    }\n"
+            "  ]\n"
             "}"
         )
 
@@ -188,6 +210,8 @@ class AIAnalyzer:
                         continue
         
         self._debug_log("All JSON parsing attempts failed")
+        click.secho("\nFailed to parse JSON. Raw response:", fg='yellow')
+        click.echo(response_text)
         return None
 
     def _fix_json_text(self, text: str) -> str:
@@ -202,6 +226,7 @@ class AIAnalyzer:
         """Clean up an uploaded file."""
         try:
             self._debug_log(f"Cleaning up file: {file_name}")
+            # Use the files.delete attribute directly as a callable
             self.client.files.delete(file_name)
         except Exception as e:
             self._debug_log(f"Warning: cleanup error: {str(e)}")
